@@ -1,3 +1,5 @@
+![Screenshot](screenshot.gif)
+
 Automatic Arbitrage Trader for Cryptocurrencies in Global Exchanges
 
 This repo is a sample code of an automatic arbitrage trader for cryptocurrencies (Bitcoin, Ethereum, Litecoin, etc.) in global exchanges. It is a legacy version in mid 2017.
