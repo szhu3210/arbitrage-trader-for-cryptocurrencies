@@ -1,4 +1,4 @@
-Automatic Arbitrage Trader for Cryptocurrencies in Global Exchanges
+# Automatic Arbitrage Trader for Cryptocurrencies in Global Exchanges
 
 ![Screenshot](screenshot.gif)
 
