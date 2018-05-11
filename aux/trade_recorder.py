@@ -3,15 +3,14 @@ import logging
 import os.path
 import time
 from collections import OrderedDict
-
-from client import poloniex_client
-from config import config_coin
+from client import unified_client
+from config import config_trader, config_coin
 
 FILENAME = 'logs/trade_record.csv'
 
 
 def save_trading_result(pair='N/A', market='N/A', premium_report='N/A', premium_threshold='N/A',
-                        trade_amount='N/A', profit='N/A', assets=None, profit_ratio_num=0.0):
+                        trade_amount='N/A', profit='N/A', assets=None, profit_ratio_num=0.0, is_reversed=False):
 
     logging.warning('Save trading result...')
     currency_list = config_coin.currency_list['standard']
@@ -25,6 +24,7 @@ def save_trading_result(pair='N/A', market='N/A', premium_report='N/A', premium_
         result['time (GMT)'] = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
         result['time (local)'] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         result['time zone'] = time.strftime("%z", time.gmtime())
+        result['reversed'] = str(is_reversed)
         result['pair'] = pair
         result['market'] = market
         result['premium'] = premium_report
@@ -37,11 +37,11 @@ def save_trading_result(pair='N/A', market='N/A', premium_report='N/A', premium_
 
         try:
 
-            prices = poloniex_client.PoloniexClient().returnTicker()
+            prices = unified_client.UnifiedClient(config_trader.market_fetch_ticker).get_tickers()
 
             for currency in currency_list:
                 result[currency + ' price in USDT'] = \
-                    prices['USDT_' + (currency if currency != 'BCC' else 'BCH')]['last'] \
+                    prices[currency + '/USDT'] \
                     if currency != 'USDT' else '1.00'
 
             if 'N/A' in [result[currency] for currency in currency_list]:
@@ -83,7 +83,7 @@ if __name__ == '__main__':
     pass
     from aux import assets_monitor
 
-    FILENAME = '../log/trade_record.csv'
+    FILENAME = '../logs/trade_record.csv'
 
     save_trading_result(pair='Test Pair', market='Test Market', premium_report='0.02', premium_threshold='0.12',
                         trade_amount='2.00', profit='21.39', assets=assets_monitor.AssetsMonitor().get_assets())

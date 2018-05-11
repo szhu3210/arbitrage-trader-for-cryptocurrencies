@@ -1,101 +1,116 @@
-import functools
+# TODO: test this function after the currency balancer is done.
+
+import time
 import logging
-import poloniex
-from aux import email_client, assets_monitor, coin_transfer
+import arbitrage_trader
+from aux import email_client, assets_monitor, premium_calculator
 from aux.timeout import timeout
 from config import config_coin, config_trader
-
-
-def insufficient_balance_error_handler(func):
-    @functools.wraps(func)
-    def wrapper(*args, **kw):
-        try:
-            res = func(*args, **kw)
-            return res
-        except BaseException as e:
-            if '余额不足' in str(e):
-                logging.warning('Insufficient balance error handler: Balance not available for transfer. Need to wait.')
-                return 'Insufficient balance for transfer.'
-    return wrapper
 
 
 class CoinBalancer:
 
     @staticmethod
     @timeout(120, 'Timeout: function has been running for more than 120 seconds.')
-    @insufficient_balance_error_handler
-    def balance_balances():
+    def balance_balances(premiums):
 
-        balances = assets_monitor.AssetsMonitor().get_balances_mp(include_frozen=False)
-        logging.warning('Current balances:')
+        balances = assets_monitor.AssetsMonitor().get_balances(include_frozen=True)
+        # balances = assets_monitor.AssetsMonitor().get_balances_async(include_frozen=True)
+        logging.info('Current balances:')
+        logging.info(balances)
 
+        # for market in balances:
+        #     balances[market] = assets_monitor.AssetsMonitor().cal_usdt_equivalent(balances[market])
+        #     logging.warning(market + ': \t' + ''.join(
+        #         [(currency + ': ' + balances[market][currency] + '\t')
+        #          for currency in config_coin.currency_list['standard']]))
+
+        imbalance_ratio = {}
         for market in balances:
-            logging.warning(market + ': \t' + ''.join(
-                [(currency + ': ' + balances[market][currency] + '\t') for currency in config_coin.currency_list['standard']]))
+            imbalance_ratio[market] = {}
+            for currency in config_coin.currency_list['standard']:
+                imbalance_ratio[market][currency] = '%.4f' % (float(balances[market][currency])
+                                                              / float(config_coin.even_level[currency]) - 1.0)
+        logging.info('Balance even ratio:')
+        for market in imbalance_ratio:
+            logging.info(imbalance_ratio[market])
 
-        for currency in config_coin.currency_list['standard']:
+        balance_list = []
+        for market_hi, market_lo in config_trader.market_pairs:
 
-            # logging.warning('Checking %s.' % currency)
+            base_currencies = [currency for currency in config_coin.currency_list['standard']
+                               if float(imbalance_ratio[market_hi][currency])
+                               > float(config_coin.imbalance_threshold_hi)
+                               and float(imbalance_ratio[market_lo][currency])
+                               < -float(config_coin.imbalance_threshold_lo)]
+            quote_currencies = [currency for currency in config_coin.currency_list['standard']
+                                if float(imbalance_ratio[market_lo][currency])
+                                > float(config_coin.imbalance_threshold_hi)]
 
-            min_balance = None
-            min_market = None
-            max_balance = None
-            max_market = None
+            logging.info('Market pair: %s, %s' % (market_hi, market_lo))
+            logging.info('Currency pair: %s, %s' % (str(base_currencies), str(quote_currencies)))
 
-            for market in config_trader.market_list:
+            for currency_pair in config_trader.trade_currency_pairs:
+                base_currency, quote_currency = currency_pair.split('/')
+                if base_currency in base_currencies and quote_currency in quote_currencies:
+                    balance_list.append([currency_pair, market_hi, market_lo,
+                                         config_coin.balance_premium_threshold])
 
-                balance = balances[market][currency]
-                if not min_balance or float(balance) < float(min_balance):
-                    min_balance = balance
-                    min_market = market
-                if not max_balance or float(balance) > float(max_balance):
-                    max_balance = balance
-                    max_market = market
+        logging.warning('Balance list: %s' % str(balance_list))
 
-            if min_market == max_market:
-                logging.warning('Caution: min_market == max_market.')
-                break
-
-            low_level = config_coin.low_level[currency]
-            if float(min_balance) < float(low_level):
-                logging.warning('%s balance (%s) in %s market is below low level (%s), needs transfer.' %
-                                (currency, min_balance, min_market, low_level))
-                amount = '%.2f' % ((float(max_balance) - float(low_level)) * float(config_coin.transfer_ratio))
-                logging.warning('Transfer amount: %s' % amount)
-                if float(amount) < float(config_coin.min_transfer[currency]):
-                    logging.warning('Amount smaller than min amount (%s).' % config_coin.min_transfer[currency])
+        if balance_list:
+            logging.warning('=====     Coin Balancer (adaptive & reversed arbitrage)      =====')
+            balance_list.sort(key=lambda x: float(x[3]))
+            premium_cache = premiums
+            for i in range(len(balance_list)):
+                currency_pair, market_hi, market_lo, threshold = balance_list[i]
+                logging.info('Trying to balance %s.' % str(balance_list[i]))
+                try:
+                    the_premium = [premium for premium in premium_cache
+                                   if (premium['currency_pair'] == currency_pair and
+                                       premium['market_hi'] == market_hi and
+                                       premium['market_lo'] == market_lo)]
+                    # print(the_premium)
+                    if not the_premium:
+                        continue
+                        # premium = premium_calculator.get_premium_mp(currency_pair=currency_pair, market_hi=market_hi,
+                        #                                             market_lo=market_lo)
+                    else:
+                        premium = the_premium[0]
+                    # print(premium)
+                except BaseException as err:
+                    logging.warning('Get premium failed. %s' % str(err))
+                    continue
+                if float(premium['premium']) > float(threshold):
+                    logging.warning('Premium (%s, threshold: %s) is good for reversed arbitrage.' % (premium, threshold))
+                    logging.warning('Sending arbitrage order to trader: %s' % str(premium))
+                    try:
+                        status = arbitrage_trader. \
+                            ArbitrageTrader(currency_pair, premium['market_hi'],
+                                            premium['market_lo'], premium['premium'], premium_threshold=threshold). \
+                            arbitrage(is_reversed=True)
+                        logging.warning('Arbitrage order (reversed) finished. Status: %s' % status)
+                        break
+                    except BaseException as err:
+                        if any([err_ignore_message in str(err)
+                                for err_ignore_message in config_trader.err_ignore_messages]):
+                            logging.warning('Arbitrage (reversed) execution error: %s' % err)
+                        elif any([err_wait_message in str(err)
+                                  for err_wait_message in config_trader.err_wait_messages]):
+                            logging.warning('Error of exchange: %s' % str(err))
+                            logging.warning('Sleep for 30 seconds.')
+                            time.sleep(30)
+                        else:
+                            email_client.EmailClient().notify_me_by_email(
+                                title='Arbitrage (reversed) Execution of %s Error: %s' % (premium, err),
+                                content='Please handle exception.')
                 else:
-                    status = coin_transfer.CoinTransfer().transfer(
-                        max_market, min_market, currency=currency, amount=amount)
-                    logging.warning('Transferred %s %s from %s to %s, status: %s' %
-                                    (amount, currency, max_market, min_market, status))
-            else:
-                logging.warning('No need to transfer %s.' % currency)
-
-    def execute_coin_balance(self):
-
-        try:
-            self.balance_balances()
-
-        except poloniex.PoloniexError as e:
-            if 'Withdrawal would exceed your daily withdrawal limit.' in str(e):
-                logging.warning('Withdrawal exceeds daily limit.')
-                email_client.EmailClient().\
-                    notify_me_by_email(title='Coin balancer error: Withdraw exceeds daily limit.',
-                                       content='PoloniexError')
-            else:
-                logging.error('Other Poloniex error happened: %s' % e)
-
-        except TimeoutError:
-            logging.warning('Coin balancer time out!\n')
-
-        except BaseException as e:
-            logging.warning('Error occurred in coin balancer. Sending email notification: %s' % e)
-            email_client.EmailClient().notify_me_by_email(title='Error occurred in coin balancer.',
-                                                          content='Error (%s) occurred.\n Please check code.' % e)
+                    logging.info('Premium (%s) is not high enough (%s) for reversed arbitrage.' %
+                                 (premium['premium'], threshold))
+        else:
+            logging.warning('No need to balance coins.')
 
 
 if __name__ == '__main__':
     pass
-    # CoinBalancer().balance_balances()
-    CoinBalancer().execute_coin_balance()
+    CoinBalancer().balance_balances()
